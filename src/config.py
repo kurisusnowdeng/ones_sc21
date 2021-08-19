@@ -19,7 +19,7 @@ wait_for_scaling = 6
 num_gpus_per_node = 4
 max_size_limit = 8
 scale_down_factor = 0.5
-num_epochs_before_next_scaling = 3
+num_epochs_before_next_scaling = 2
 
 ## scaling settings
 # worker status
@@ -40,12 +40,13 @@ convergence_delta = 0.01
 lr_scaling_factor = 1.0
 
 ## scheduler settings
-num_jobs = 1
+num_jobs = 50
 
 # parameters of evolutionary algorithm
 population_size = 8
 crossover_probability = 0.5
-mutate_rate = 0.1
+mutate_rate = 0.3
+scale_down_factor = 1.0
 update_interval = 1
 
 # monitor settings
@@ -62,8 +63,10 @@ monitored_status_complete = 16
 # path to store traces
 trace_path = 'traces/'
 # path to store logs
-log_path = 'log/dev/'
+log_path = 'log/test/'
 # path to store checkpoints
-ckpt_path = 'checkpoints/dev/'
+ckpt_path = 'checkpoints/test/'
 # path to job history
 job_history_path = 'traces/job_history.csv'
+
+out_path = 'out/'

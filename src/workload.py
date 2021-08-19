@@ -36,7 +36,7 @@ task_scripts = {
 logger = get_logger('Workload')
 ctrl_addr = 'localHost'
 ctrl_port = 34625
-trace_file = 'trace_dev.csv'
+trace_file = 'trace_1.csv'
 
 def submit(model,
            task,
@@ -89,6 +89,7 @@ def run_trace(N=math.inf):
                 break
 
     for t in jobs:
+        t.daemon = True
         t.start()
 
     return len(jobs)

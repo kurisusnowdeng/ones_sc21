@@ -17,7 +17,7 @@ do
 done
 
 ROOT_PATH=/path/to/project
-LOG_PATH=log/dev
+LOG_PATH=log/test
 
 sbatch -J "${JOBNAME}_0" \
 	-o "${ROOT_PATH}/log/slurm/${JOBNAME}_0_out.txt" \

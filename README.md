@@ -17,7 +17,7 @@ We present a prototype of ONES, which is implemented with [RPyC](https://rpyc.re
    ```
 3. Download the repository.
    ```
-   $  git clone https://github.com/kurisusnowdeng/ones.git
+   $  git clone https://github.com/kurisusnowdeng/ones_sc21.git
    ```
 4. Setup the virtual environment by runnning `scripts/env_setup.sh`. The following libraries will be installed.
    ```
@@ -58,13 +58,14 @@ We present a prototype of ONES, which is implemented with [RPyC](https://rpyc.re
 
 ### Run Experiments on TACC
 
-1. Set `/path/to/project` in `scripts/master.slurm` and `scripts/worker.slurm` to your project directory.
-2. Submit the job to the `rtx` queue.
+1. Set `/path/to/project` in `scripts/launch.sh`, `scripts/master.slurm` and `scripts/worker.slurm` to your project directory
+2. Run `scripts/preparation.sh` to download datasets.
+3. Submit the job to the `rtx` queue (in case the `rtx` queue is busy, please use the option `-n` to run a smaller cluster such as n=8).
    ```
    $  ./scripts/launch.sh -j JOB_NAME -n 16 -t 06:00:00
    ```
-3. After the job is completed, extract and analyze results from logs (defaultly located in `log/test`, which can be modified in `src/config.py`).
+4. After the job is completed, extract and analyze results from logs (defaultly located in the folder `out/`, which can be modified in `src/config.py`).
    ```
    $  python ./scripts/measurement.py
    ```
-   This script will generate the plots as presented in our paper.
+   This script will generate the plots as presented in our paper under the project path.

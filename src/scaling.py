@@ -96,6 +96,9 @@ class ScalingAgent:
         self.num_labels = num_labels
         self.convergence_counter = 0
 
+        self.logger.info('Job {} - GPU {} initialization complete.'.format(
+            self.job_id, self.local_rank))
+
         if scale:
             self._scale_sync()
             self.start_epoch, self.lr, _, _, _ = self._sync_progress()
@@ -129,6 +132,8 @@ class ScalingAgent:
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
             self.size, self.rank, self.master_addr, self.master_port = conn.root.setup(
                 self.job_id, self.local_rank)
+        self.logger.info('Setting up job {} ({}/{}) on node {} - GPU {} ...'.format(
+            self.job_id, self.rank, self.size, self.node_id, self.local_rank))
         if self.rank >= 0:
             dist.init_process_group(backend="nccl",
                                     init_method="tcp://" + self.master_addr +
