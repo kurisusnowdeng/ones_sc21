@@ -9,7 +9,8 @@ from .config import *
 def _train_epoch(sa, epoch):
     # sa.logger.info('Number of workers: %d' % sa.size)
     global_batch_size = sa.size * sa.batch_size
-    sa.logger.info('Job %d - Epoch %d start: lr = %g' % (sa.job_id, epoch, sa.scaled_lr))
+    sa.logger.info('Job %d - Epoch %d start: lr = %g' %
+                   (sa.job_id, epoch, sa.scaled_lr))
     sa.dist_net.train()
 
     # warm up lr if lr is scaled
@@ -129,8 +130,6 @@ def train(sa, num_epochs=None, patience=None):
         epoch = sa.upload_log(epoch, 0, loss=loss, acc=acc)
     while True:
         num_samples, loss, throughput = _train_epoch(sa, epoch)
-        # sa.num_samples += num_samples
-        print('GPU {}/{}: epoch {} training completed ({}/{} samples).'.format(sa.local_rank, sa.size, epoch, num_samples, sa.epoch_size))
         if num_samples * sa.size * 2 >= sa.epoch_size:
             loss, acc = _eval(sa, epoch)
             epoch = sa.upload_log(epoch,
@@ -140,7 +139,7 @@ def train(sa, num_epochs=None, patience=None):
                                   acc=acc)
         else:
             epoch = sa.upload_log(epoch, num_samples, throughput=throughput)
-        if sa.flag_scale:
+        if sa.check_pause() and sa.flag_scale:
             sa.scale()
         if sa.exit_status in [exit_released, exit_stopped]:
             return epoch

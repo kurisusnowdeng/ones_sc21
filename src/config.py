@@ -18,7 +18,8 @@ wait_for_scaling = 6
 # parameters for max batch size control
 num_gpus_per_node = 4
 max_size_limit = 8
-scale_down_factor = 0.01
+scale_down_factor = 0.5
+num_epochs_before_next_scaling = 3
 
 ## scaling settings
 # worker status
@@ -43,8 +44,8 @@ num_jobs = 1
 
 # parameters of evolutionary algorithm
 population_size = 8
-crossover_probability = 0.3
-mutate_rate = 0.3
+crossover_probability = 0.5
+mutate_rate = 0.1
 update_interval = 1
 
 # monitor settings

@@ -148,12 +148,16 @@ class Monitor:
         return inputs, targets
 
     def _update_predictor(self):
-        inputs, targets = self._transform([
-            self.predictor_data[i]
-            for i in np.random.choice(len(self.predictor_data),
-                                      size=predictor_epoch_size,
-                                      replace=False)
-        ])
+        if len(self.predictor_data) > predictor_epoch_size:
+            data = [
+                self.predictor_data[i]
+                for i in np.random.choice(len(self.predictor_data),
+                                          size=predictor_epoch_size,
+                                          replace=False)
+            ]
+        else:
+            data = self.predictor_data
+        inputs, targets = self._transform(data)
         self.predictor.fit(inputs, targets)
 
     def add(self, job_id, epoch_size):

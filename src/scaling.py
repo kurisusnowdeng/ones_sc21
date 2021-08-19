@@ -36,11 +36,13 @@ def init(port, agent):
 
 class ScalingAgent:
     def __init__(self,
-        model_name,
-        local_rank,
-        port,
-        mgr_addr='localhost',
-        mgr_port=17834):
+                 job_id,
+                 model_name,
+                 local_rank,
+                 port,
+                 mgr_addr='localhost',
+                 mgr_port=17834):
+        self.job_id = job_id
         self.name = model_name
         # communication settings
         self.size = None
@@ -57,27 +59,27 @@ class ScalingAgent:
         self.flag_stop = False
         self.exit_status = None
         with rpyc.connect(mgr_addr, mgr_port) as conn:
-            self.job_id, self.node_id = conn.root.get_id(local_rank)
+            self.node_id = conn.root.get_id()
         self.logger = get_logger('Worker_' + str(self.job_id) + '_' +
-               str(self.node_id) + '_' + str(local_rank))
+                                 str(self.node_id) + '_' + str(local_rank))
         self.service = init(port, self)
-        self.logger.info('Job {} - worker on Node {} GPU {} started.'.format(
-         self.job_id, self.node_id, self.local_rank))
+        self.logger.info('Job {} (node {} - GPU {}) started.'.format(
+            self.job_id, self.node_id, self.local_rank))
 
     def load(
-      self,
-      net,
-      criterion,
-      optimizer,
-      trainset,
-      testset,
-      batch_size,
-      lr,
-      num_labels,
-      start_epoch=0,
-      #  num_samples=0,
-      scale=False,
-      device='cuda'):
+            self,
+            net,
+            criterion,
+            optimizer,
+            trainset,
+            testset,
+            batch_size,
+            lr,
+            num_labels,
+            start_epoch=0,
+            #  num_samples=0,
+            scale=False,
+            device='cuda'):
         # load distributed model
         self.device = device
         self.batch_size = batch_size
@@ -99,57 +101,67 @@ class ScalingAgent:
             self.start_epoch, self.lr, _, _, _ = self._sync_progress()
 
         self._setup()
+
+        while not self.train_ready():
+            self.logger.info('Job {}: GPU {} is not ready'.format(
+                self.job_id, self.local_rank))
+            time.sleep(0.1)
+
         self.dist_net = torch.nn.parallel.DistributedDataParallel(self.net)
         self.trainloader = self._dist_loader(self.trainset)
         self.adjust_learning_rate()
         self.logger.info(
-         'Job {} (node {} - GPU {}): scaling agent loaded.'.format(
-          self.job_id, self.node_id, self.local_rank))
+            'Job {} (node {} - GPU {}): scaling agent initialized.'.format(
+                self.job_id, self.node_id, self.local_rank))
 
     def get_lr(self):
         return self.lr
 
     def _dist_loader(self, dataset):
         sampler = torch.utils.data.distributed.DistributedSampler(
-         dataset, num_replicas=self.size, rank=self.rank)
+            dataset, num_replicas=self.size, rank=self.rank)
         return torch.utils.data.DataLoader(dataset,
-                   batch_size=self.batch_size,
-                   sampler=sampler,
-                   num_workers=8)
+                                           batch_size=self.batch_size,
+                                           sampler=sampler,
+                                           num_workers=8)
 
     def _setup(self):
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
             self.size, self.rank, self.master_addr, self.master_port = conn.root.setup(
-             self.local_rank)
+                self.job_id, self.local_rank)
         if self.rank >= 0:
             dist.init_process_group(backend="nccl",
-                  init_method="tcp://" + self.master_addr +
-                  ":" + str(self.master_port),
-                  world_size=self.size,
-                  rank=self.rank)
+                                    init_method="tcp://" + self.master_addr +
+                                    ":" + str(self.master_port),
+                                    world_size=self.size,
+                                    rank=self.rank)
             self.logger.info('GPU %d : NCCL setup complete' % self.local_rank)
 
     def _sync_progress(self):
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
-            return conn.root.sync_progress(self.local_rank)
+            return conn.root.sync_progress(self.job_id)
 
     def _scale_sync(self):
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
-            conn.root.scale_ready(self.local_rank)
+            conn.root.scale_ready(self.job_id, self.local_rank)
             self.size, self.rank, self.master_addr, self.master_port = conn.root.setup(
-             self.local_rank)
+                self.job_id, self.local_rank)
         if self.rank >= 0:
             dist.init_process_group(backend="nccl",
-                  init_method="tcp://" + self.master_addr +
-                  ":" + str(self.master_port),
-                  world_size=self.size,
-                  rank=self.rank)
+                                    init_method="tcp://" + self.master_addr +
+                                    ":" + str(self.master_port),
+                                    world_size=self.size,
+                                    rank=self.rank)
             for param in self.net.parameters():
                 dist.broadcast(param.data, src=0)
             with rpyc.connect(self.manager_addr, self.manager_port) as conn:
-                conn.root.broadcast_complete(self.local_rank)
+                conn.root.broadcast_complete(self.job_id, self.local_rank)
             dist.barrier()
             dist.destroy_process_group()
+
+    def train_ready(self):
+        with rpyc.connect(self.manager_addr, self.manager_port) as conn:
+            return conn.root.train_ready(self.job_id, self.local_rank)
 
     def set_scale(self, batch_size, lr):
         if not self.flag_scale:
@@ -163,9 +175,13 @@ class ScalingAgent:
             self.flag_stop = True
 
     def check_pause(self):
-        if not (self.flag_scale or self.flag_stop):
-            time.sleep(0.01)
-        return self.flag_scale or self.flag_stop
+        # pause when all workers are set
+        pause = torch.zeros(1) \
+            if self.flag_scale or self.flag_stop \
+                else torch.ones(1)
+        pause = pause.to(self.device)
+        dist.all_reduce(pause)
+        return pause == 0
 
     def scale(self):
         dist.barrier()
@@ -182,22 +198,20 @@ class ScalingAgent:
         self.flag_scale = False
 
     def upload_log(self,
-          epoch,
-          num_samples,
-          throughput=None,
-          loss=None,
-          acc=None):
-        self.logger.info('Finishing epoch {} ...'.format(epoch))
+                   epoch,
+                   num_samples,
+                   throughput=None,
+                   loss=None,
+                   acc=None):
+        self.logger.info('Job {}: finishing epoch {} ...'.format(
+            self.job_id, epoch))
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
-            # loss, acc, convergence_counter, epoch = conn.root.update_log(
-            #     self.size, self.rank, self.local_rank, epoch, num_samples,
-            #     self.batch_size, self.lr, throughput, loss, acc)
-            conn.root.update_log(self.size, self.rank, self.local_rank, epoch,
-                  num_samples, self.batch_size, self.lr,
-                  throughput, loss, acc)
+            conn.root.update_log(self.job_id, self.size, self.rank,
+                                 self.local_rank, epoch, num_samples,
+                                 self.batch_size, self.lr, throughput, loss,
+                                 acc)
         dist.barrier()
-        epoch, lr, loss, acc, convergence_counter = self._sync_progress(
-        )
+        epoch, _, loss, acc, convergence_counter = self._sync_progress()
         self.convergence_counter = convergence_counter
         return epoch
 
@@ -205,12 +219,13 @@ class ScalingAgent:
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
             if self.exit_status in [exit_complete, exit_stopped]:
                 dist.barrier()
-                conn.root.worker_complete(self.local_rank, save_path)
+                conn.root.worker_complete(self.job_id, self.local_rank,
+                                          save_path)
             else:
-                conn.root.worker_release(self.local_rank)
+                conn.root.worker_release(self.job_id, self.local_rank)
         self.service.close()
-        self.logger.info('Job {} - worker on Node {} GPU {} finished.'.format(
-         self.job_id, self.node_id, self.local_rank))
+        self.logger.info('Job {} (node {} - GPU {}) finished.'.format(
+            self.job_id, self.node_id, self.local_rank))
 
     def adjust_learning_rate(self, lr=None):
         if lr is None:

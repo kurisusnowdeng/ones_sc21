@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import sys
 import time
 from threading import Lock, Thread
 
@@ -81,7 +82,6 @@ class Controller:
             'completed_epochs': 0,
             'completed_samples': 0,
             'status': None,
-            'mutex': Lock(),
             'train_log': list(),
             'schedule_log': list(),
             'model_path': ckpt_path + str(job_id) + '/',
@@ -95,6 +95,7 @@ class Controller:
             'lr': None,
             'start_time': None,
             'size': 0,
+            'mutex': Lock(),
             'master': None,
             'placement': None,
             'workers': dict(),
@@ -127,8 +128,6 @@ class Controller:
             self.waiting_jobs.append(new_waiting_job)
             if self.monitoring:
                 self.monitor.add(new_job['id'], epoch_size)
-            # logger.info('job %d submitted' % new_job['id'])
-            # print(new_job)
         return new_job['id']
 
     def _elastic_batch_size_and_lr(self, job_id, size):
@@ -163,17 +162,17 @@ class Controller:
 
     def run(self, job_id, placement, resume=False, scale=None):
         job2run = self._get_job(job_id)
+        self.jobs[job_id]['status'] = status_running
         job2run['batch_size'], job2run['lr'] = self._elastic_batch_size_and_lr(
             job_id, len(placement))
-        self.jobs[job_id]['status'] = status_running
+        running_job = self.running_jobs[job_id]
+        running_job['batch_size'] = job2run['batch_size']
+        running_job['lr'] = job2run['lr']
         waiting_job = self.waiting_jobs[job_id]
         with waiting_job['mutex']:
             waiting_job['status'] = None
             waiting_job['size'] = 0
         if scale is None:
-            running_job = self.running_jobs[job_id]
-            running_job['batch_size'] = job2run['batch_size']
-            running_job['lr'] = job2run['lr']
             running_job['placement'] = placement
             running_job['size'] = len(placement)
             master_node, _ = placement[0]
@@ -196,9 +195,6 @@ class Controller:
                              False)).start()
             running_job['start_time'] = time.time()
         elif scale == 'out':
-            running_job = self.running_jobs[job_id]
-            running_job['batch_size'] = job2run['batch_size']
-            running_job['lr'] = job2run['lr']
             running_job['new_placement'] = placement
             prev_size = running_job['size']
             cur_placement = running_job['placement']
@@ -226,9 +222,6 @@ class Controller:
                        args=(node_id, local_rank, job2run, False,
                              True)).start()
         elif scale == 'in':
-            running_job = self.running_jobs[job_id]
-            running_job['batch_size'] = job2run['batch_size']
-            running_job['lr'] = job2run['lr']
             running_job['new_placement'] = placement
             self._set_scale(job_id)
 
@@ -241,29 +234,29 @@ class Controller:
                                   self.cluster[node_id]['port']) as conn:
                     logger.info('job %d: stopping node %d - GPU %d' %
                                 (job_id, node_id, local_rank))
-                    conn.root.set_stop(local_rank)
+                    conn.root.set_stop(job_id, local_rank)
 
     def setup(self, job_id, node_id, local_rank):
-        # with self.jobs[job_id]['mutex']:
         job = self.running_jobs[job_id]
-        size = job['size']
-        if (node_id, local_rank) in job['workers']:
-            rank = job['workers'][(node_id, local_rank)]['rank']
-        else:
-            rank = -1
-        master_addr = job['master']['addr']
-        master_port = job['master']['port']
-        if rank >= 0:
-            logger.info('job %d: node %d - GPU %d joined (rank %d/%d)' %
-                        (job_id, node_id, local_rank, rank, size))
-            if job['workers'][(node_id, local_rank)]['status'] in [
-                    worker_initializing, worker_scale_complete
-            ]:
-                job['workers'][(node_id,
-                                local_rank)]['status'] = worker_running
-        else:
-            logger.info('job %d: node %d - GPU %d released' %
-                        (job_id, node_id, local_rank))
+        with job['mutex']:
+            size = job['size']
+            if (node_id, local_rank) in job['workers']:
+                rank = job['workers'][(node_id, local_rank)]['rank']
+            else:
+                rank = -1
+            master_addr = job['master']['addr']
+            master_port = job['master']['port']
+            if rank >= 0:
+                logger.info('job %d: node %d - GPU %d joined (rank %d/%d)' %
+                            (job_id, node_id, local_rank, rank, size))
+                if job['workers'][(node_id, local_rank)]['status'] in [
+                        worker_initializing, worker_scale_complete
+                ]:
+                    job['workers'][(node_id,
+                                    local_rank)]['status'] = worker_running
+            else:
+                logger.info('job %d: node %d - GPU %d released' %
+                            (job_id, node_id, local_rank))
         return size, rank, master_addr, master_port
 
     def _set_scale(self, job_id):
@@ -275,7 +268,7 @@ class Controller:
                 with rpyc.connect(self.cluster[node_id]['addr'],
                                   self.cluster[node_id]['port']) as conn:
                     conn.root.set_scale(
-                        local_rank, self.running_jobs[job_id]['batch_size'],
+                        job_id, local_rank, self.running_jobs[job_id]['batch_size'],
                         self.running_jobs[job_id]['lr'])
 
     def _check_worker_status(self, job_id, status_list):
@@ -288,14 +281,18 @@ class Controller:
     def scale_ready(self, job_id, node_id, local_rank):
         job = self.running_jobs[job_id]
         workers = job['workers']
-        if workers[(node_id, local_rank)]['status'] == worker_initializing:
-            workers[(node_id, local_rank)]['status'] = worker_scale_ready
-            if self._check_worker_status(
-                    job_id,
-                [worker_running, worker_scale_ready]) == job['size']:
-                self._set_scale(job_id)
-        elif workers[(node_id, local_rank)]['status'] == worker_running:
-            workers[(node_id, local_rank)]['status'] = worker_scale_ready
+        if (node_id, local_rank) in workers:
+            if workers[(node_id, local_rank)]['status'] == worker_initializing:
+                workers[(node_id, local_rank)]['status'] = worker_scale_ready
+                if self._check_worker_status(
+                        job_id,
+                    [worker_running, worker_scale_ready]) == job['size']:
+                    self._set_scale(job_id)
+            elif workers[(node_id, local_rank)]['status'] == worker_running:
+                workers[(node_id, local_rank)]['status'] = worker_scale_ready
+        else:
+            logger.error('Node {} - GPU {} is not assigned to job {}.'.format(
+                node_id, local_rank, job_id))
 
     def sync_progress(self, job_id):
         job = self.jobs[job_id]
@@ -303,8 +300,8 @@ class Controller:
             'current_acc'], job['convergence_counter']
 
     def broadcast_complete(self, job_id, node_id, local_rank):
-        with self.jobs[job_id]['mutex']:
-            job = self.running_jobs[job_id]
+        job = self.running_jobs[job_id]
+        with job['mutex']:
             job['workers'][(node_id,
                             local_rank)]['status'] = worker_scale_complete
             if self._check_worker_status(
@@ -326,6 +323,9 @@ class Controller:
                                              j) in enumerate(job['placement'])}
                 logger.info('job %d: scaling complete --> ' % job_id +
                             str(job['placement']))
+        if self.monitoring:
+            self.monitor.monitored_jobs[job_id][
+                'last_scaled_epoch'] = self.jobs[job_id]['completed_epochs']
         return
 
     def worker_complete(self, job_id, node_id, local_rank, save_path):
@@ -334,7 +334,7 @@ class Controller:
         job = self.jobs[job_id]
         if save_path is not None:  # master worker, rank 0
             job['model_path'] = save_path
-        with job['mutex']:
+        with self.running_jobs[job_id]['mutex']:
             if self._check_worker_status(
                     job_id,
                 [worker_complete
@@ -343,7 +343,8 @@ class Controller:
                 job['run_time'] += end_time - self.running_jobs[job_id][
                     'start_time']
                 if job['status'] == status_running:
-                    self.monitor.add_to_history(job_id)
+                    if self.monitoring:
+                        self.monitor.add_to_history(job_id)
                     job['end_time'] = end_time
                     job['completion_time'] = end_time - job['start_time']
                     logger.info('job %d complete, %d samples completed' %
@@ -356,6 +357,9 @@ class Controller:
                     with waiting_job['mutex']:
                         waiting_job['status'] = wait_for_resuming
                         waiting_job['size'] = self.running_jobs[job_id]['size']
+                        if self.monitoring:
+                            self.monitor.monitored_jobs[job_id][
+                                'max_size'] = waiting_job['size']
                     logger.info('job %d stopped, %d samples completed' %
                                 (job_id, job['completed_samples']))
                 self.running_jobs[job_id]['workers'].clear()
@@ -394,7 +398,7 @@ class Controller:
                    num_samples, batch_size, lr, throughput, loss, acc):
         job = self.running_jobs[job_id]
         log = job['train_log']
-        with self.jobs[job_id]['mutex']:
+        with job['mutex']:
             log['batch_size'] += batch_size
             log['num_samples'] += num_samples
             if loss is not None:
@@ -429,41 +433,13 @@ class Controller:
                     self.monitor.update_progress(job_id, log)
                 job['train_log'] = self._new_train_log(job_id)
         return
-        # # wait for all worker done
-        # while log['submitted_workers'] < size:
-        #     pass
-        # # update at rank 0
-        # if rank == 0:
-        #     log['size'] = size
-        #     log['epoch'] = epoch
-        #     self.jobs[job_id]['batch_size'] = log['batch_size']
-        #     self.jobs[job_id]['lr'] = log['lr'] = lr
-        #     if log['loss'] is not None:
-        #         log['loss'] /= log['size']
-        #     if log['acc'] is not None:
-        #         log['acc'] /= log['size']
-        #         self.jobs[job_id]['completed_epochs'] += 1
-        #         self._early_stop(job_id, log['acc'])
-        #     self.jobs[job_id]['completed_samples'] += log['num_samples']
-        #     self.jobs[job_id]['train_log'].append(log)
-        #     if self.monitoring:
-        #         self.monitor.update_progress(job_id, log)
-        #     job['train_log'] = self._new_train_log(job_id)
-        # else:
-        #     # wait for rank 0 update
-        #     while log['id'] == job['train_log']['id']:
-        #         pass
-
-        # if epoch > 0 and log['acc'] is None:
-        #     return None, None, 0, epoch
-        # else:
-        #     return log['loss'], log['acc'], self.jobs[job_id][
-        #         'convergence_counter'], epoch + 1
 
     def get_new_jobs(self):
         return [
             job['id'] for job in self.waiting_jobs
-            if job['status'] == wait_for_start
+            if (job['status'] == wait_for_start) or (
+                job['status'] == wait_for_resuming
+                and job['completed_epochs'] < num_epochs_before_next_scaling)
         ]
 
     def get_running_jobs(self):
@@ -485,13 +461,22 @@ class Controller:
         for node in self.cluster:
             with rpyc.connect(node['addr'], node['port']) as conn:
                 conn.root.terminate()
-        self.monitor.complete()
+        if self.monitoring:
+            self.monitor.complete()
         os.remove(path)
 
     def get_gpu_status(self, node_id, local_rank):
         with rpyc.connect(self.cluster[node_id]['addr'],
                           self.cluster[node_id]['port']) as conn:
             return conn.root.get_gpu_status(local_rank)
+
+    def print_cluster(self):
+        for node in self.cluster:
+            with rpyc.connect(node['addr'], node['port']) as conn:
+                for local_rank in range(node['num_gpus']):
+                    logger.info('Node {} - GPU {} is running job {}'.format(
+                        node['id'], local_rank,
+                        conn.root.get_gpu_status(local_rank)))
 
     def num_free_gpus(self):
         num_free_gpus = 0
@@ -591,7 +576,7 @@ def main():
 
     controller = Controller(get_local_ip(),
                             ARGS.port,
-                            monitoring=ARGS.scheduler == 'ONES')
+                            monitoring=ARGS.scheduler in ['ONES', 'FCFS'])
 
     t = ThreadedServer(ControllerService(controller), port=controller.port)
     server = Thread(target=t.start, args=())
@@ -610,19 +595,21 @@ def main():
     logger.info('All nodes joined (%d/%d)' %
                 (len(controller.cluster), ARGS.size))
 
-    sched, t_sched = run_scheduler(controller)
-    num_submitted_jobs = run_trace()
-    # num_submitted_jobs = run_test(controller)
+    # sched, t_sched = run_scheduler(controller)
+    # num_submitted_jobs = run_trace()
+    num_submitted_jobs = run_test(controller)
 
     try:
         while controller.completed_jobs < num_submitted_jobs:
-            time.sleep(1)
+            time.sleep(10)
+            controller.print_cluster()
     except (KeyboardInterrupt, Exception) as e:
         print(e)
 
     controller.terminate(ARGS.cache_dir)
-    terminate_scheduler(sched, t_sched)
+    # terminate_scheduler(sched, t_sched)
     logger.info('System shut down.')
+    sys.exit()
 
 
 if __name__ == '__main__':

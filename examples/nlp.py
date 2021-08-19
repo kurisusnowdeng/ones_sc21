@@ -18,7 +18,6 @@ from src.training import *
 
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
-
     def __init__(self, guid, text_a, text_b=None, label=None):
         """Constructs a InputExample.
 
@@ -39,7 +38,6 @@ class InputExample(object):
 
 class InputFeatures(object):
     """A single set of features of data."""
-
     def __init__(self, input_ids, input_mask, segment_ids, label_id):
         self.input_ids = input_ids
         self.input_mask = input_mask
@@ -49,7 +47,6 @@ class InputFeatures(object):
 
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
-
     def get_train_examples(self, data_dir):
         """Gets a collection of `InputExample`s for the train set."""
         raise NotImplementedError()
@@ -75,7 +72,6 @@ class DataProcessor(object):
 
 class MrpcProcessor(DataProcessor):
     """Processor for the MRPC data set (GLUE version)."""
-
     def get_train_examples(self, data_dir):
         """See base class."""
         # logger.info("LOOKING AT {}".format(os.path.join(data_dir, "train.tsv")))
@@ -111,7 +107,6 @@ class MrpcProcessor(DataProcessor):
 
 class Sst2Processor(DataProcessor):
     """Processor for the SST-2 data set (GLUE version)."""
-
     def get_train_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
@@ -145,7 +140,6 @@ class Sst2Processor(DataProcessor):
 
 class ColaProcessor(DataProcessor):
     """Processor for the CoLA data set (GLUE version)."""
-
     def get_train_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
@@ -303,6 +297,7 @@ def get_args():
     parser.add_argument('--patience', type=int)
     parser.add_argument('--manager_addr', type=str, default='localhost')
     parser.add_argument('--manager_port', type=int, default=17834)
+    parser.add_argument('--job_id', type=int)
     parser.add_argument('--port', type=int)
     parser.add_argument('--local_rank', type=int, default=0)
     return parser.parse_args()
@@ -313,8 +308,8 @@ ARGS = get_args()
 device = 'cuda'
 torch.backends.cudnn.benchmark = True
 
-sa = scaling.ScalingAgent('nlp', ARGS.local_rank, ARGS.port, ARGS.manager_addr,
-                          ARGS.manager_port)
+sa = scaling.ScalingAgent(ARGS.job_id, 'nlp', ARGS.local_rank, ARGS.port,
+                          ARGS.manager_addr, ARGS.manager_port)
 
 # Data
 print('==> Preparing data..')

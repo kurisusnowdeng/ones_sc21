@@ -37,7 +37,7 @@ def new_worker(job, local_rank):
         '--model_dir=' + job['model_path'],
         '--epoch_size=' + str(job['epoch_size']),
         '--batch_size=' + str(job['batch_size']), '--lr=' + str(job['lr']),
-        '--local_rank=' + str(local_rank)
+        '--local_rank=' + str(local_rank), '--job_id=' + str(job['id'])
     ])
     port = free_port()
     cmd.append('--port=' + str(port))
@@ -68,83 +68,105 @@ class AppManager:
         return torch.cuda.device_count()
 
     def run(self, local_rank, job, resume=False, scale=False):
-        is_available = self.get_gpu_status(local_rank) is None
-        logger.info('Node {}: checking availability of GPU {}: {}'.format(
-            self.id, local_rank, is_available))
-        if not is_available:
-            while not is_available:
-                is_available = self.get_gpu_status(local_rank) is None
-                time.sleep(1)
-            logger.info('Node {}: checking availability of GPU {}: {}'.format(
-                self.id, local_rank, is_available))
         logger.info('Node {}: preparing job {} on GPU {} ...'.format(
             self.id, job['id'], local_rank))
-        self.worker_list[local_rank] = new_worker(job, local_rank)
-        args = self.worker_list[local_rank]['cmd']
+        worker = new_worker(job, local_rank)
+        args = worker['cmd']
         if resume:
             args.append('--resume')
         if scale:
             args.append('--scale')
         p = subprocess.Popen(' '.join(args), shell=True)
-        self.worker_list[local_rank]['process'] = p
+        logger.info('Node {}: job {} is waiting for GPU {} ...'.format(
+            self.id, job['id'], local_rank))
 
-    def setup(self, local_rank):
-        job_id = self.worker_list[local_rank]['job_id']
+        while self.get_gpu_status(local_rank) is not None:
+            logger.info('Node {} - GPU {} is not ready for job {}, used by job {}'.
+                  format(self.id, local_rank, job['id'],
+                         self.get_gpu_status(local_rank)))
+            time.sleep(0.1)
+        self.worker_list[local_rank] = worker
+        self.worker_list[local_rank]['process'] = p
+        logger.info('Node {}: job {} start on GPU {}.'.format(
+            self.id, job['id'], local_rank))
+
+    def setup(self, job_id, local_rank):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             size, rank, master_addr, master_port = conn.root.setup(
                 job_id, self.id, local_rank)
-        self.worker_list[local_rank]['size'] = size
-        self.worker_list[local_rank]['rank'] = rank
-        self.worker_list[local_rank]['master_addr'] = master_addr
-        self.worker_list[local_rank]['master_port'] = master_port
         return size, rank, master_addr, master_port
 
-    def set_scale(self, local_rank, batch_size, lr):
-        addr = 'localhost'
-        port = self.worker_list[local_rank]['port']
-        with rpyc.connect(addr, port) as conn:
-            conn.root.set_scale(batch_size, lr)
+    def train_ready(self, job_id, local_rank):
+        worker_status = self.get_gpu_status(local_rank)
+        return worker_status is not None and worker_status == job_id
 
-    def set_stop(self, local_rank):
-        addr = 'localhost'
-        port = self.worker_list[local_rank]['port']
-        with rpyc.connect(addr, port) as conn:
-            conn.root.set_stop()
+    def set_scale(self, job_id, local_rank, batch_size, lr):
+        logger.info('job %d: pausing node %d - GPU %d' %
+                    (job_id, self.id, local_rank))
+        if self.worker_list[local_rank] is not None:
+            addr = 'localhost'
+            port = self.worker_list[local_rank]['port']
+            with rpyc.connect(addr, port) as conn:
+                conn.root.set_scale(batch_size, lr)
+        else:
+            logger.error(
+                'SetScaleError: Job {} is not on node {} - GPU {}.'.format(
+                    job_id, self.id, local_rank))
 
-    def scale_ready(self, local_rank):
-        job_id = self.worker_list[local_rank]['job_id']
+    def set_stop(self, job_id, local_rank):
+        logger.info('job %d: stopping node %d - GPU %d' %
+                    (job_id, self.id, local_rank))
+        if self.worker_list[local_rank] is not None:
+            addr = 'localhost'
+            port = self.worker_list[local_rank]['port']
+            with rpyc.connect(addr, port) as conn:
+                conn.root.set_stop()
+        else:
+            logger.error(
+                'SetStopError: Job {} is not on node {} - GPU {}.'.format(
+                    job_id, self.id, local_rank))
+
+    def scale_ready(self, job_id, local_rank):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             conn.root.scale_ready(job_id, self.id, local_rank)
 
-    def sync_progress(self, local_rank):
-        job_id = self.worker_list[local_rank]['job_id']
+    def sync_progress(self, job_id):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             return conn.root.sync_progress(job_id)
 
-    def update_log(self, size, rank, local_rank, epoch, num_samples,
+    def update_log(self, job_id, size, rank, local_rank, epoch, num_samples,
                    batch_size, lr, throughput, loss, acc):
-        job_id = self.worker_list[local_rank]['job_id']
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             return conn.root.update_log(job_id, size, rank, self.id,
                                         local_rank, epoch, num_samples,
                                         batch_size, lr, throughput, loss, acc)
 
-    def broadcast_complete(self, local_rank):
-        job_id = self.worker_list[local_rank]['job_id']
+    def broadcast_complete(self, job_id, local_rank):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             conn.root.broadcast_complete(job_id, self.id, local_rank)
 
-    def worker_release(self, local_rank):
-        self.worker_list[local_rank] = None
+    def worker_release(self, job_id, local_rank):
+        if self.worker_list[local_rank] is not None:
+            if self.worker_list[local_rank]['job_id'] == job_id:
+                self.worker_list[local_rank] = None
+        else:
+            logger.error(
+                'WorkerReleaseError: Job {} is not on node {} - GPU {}.'.
+                format(job_id, self.id, local_rank))
 
-    def worker_complete(self, local_rank, save_path):
-        job_id = self.worker_list[local_rank]['job_id']
+    def worker_complete(self, job_id, local_rank, save_path):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             conn.root.worker_complete(job_id, self.id, local_rank, save_path)
-        self.worker_list[local_rank] = None
+        if self.worker_list[local_rank] is not None and self.worker_list[
+                local_rank]['job_id'] == job_id:
+            self.worker_list[local_rank] = None
+        else:
+            logger.error(
+                'WorkerCompleteError: Job {} is not on node {} - GPU {}.'.
+                format(job_id, self.id, local_rank))
 
-    def get_id(self, local_rank):
-        return self.worker_list[local_rank]['job_id'], self.id
+    def get_id(self):
+        return self.id
 
     def get_gpu_status(self, local_rank):
         if self.worker_list[local_rank] is not None:
@@ -174,41 +196,44 @@ class AppService(rpyc.Service):
     def exposed_run(self, local_rank, job, resume, scale):
         self.manager.run(local_rank, job, resume, scale)
 
-    def exposed_setup(self, local_rank):
-        return self.manager.setup(local_rank)
+    def exposed_setup(self, job_id, local_rank):
+        return self.manager.setup(job_id, local_rank)
 
-    def exposed_set_scale(self, local_rank, batch_size, lr):
-        self.manager.set_scale(local_rank, batch_size, lr)
+    def exposed_train_ready(self, job_id, local_rank):
+        return self.manager.train_ready(job_id, local_rank)
 
-    def exposed_set_stop(self, local_rank):
-        self.manager.set_stop(local_rank)
+    def exposed_set_scale(self, job_id, local_rank, batch_size, lr):
+        self.manager.set_scale(job_id, local_rank, batch_size, lr)
 
-    def exposed_scale_ready(self, local_rank):
-        self.manager.scale_ready(local_rank)
+    def exposed_set_stop(self, job_id, local_rank):
+        self.manager.set_stop(job_id, local_rank)
 
-    def exposed_sync_progress(self, local_rank):
-        return self.manager.sync_progress(local_rank)
+    def exposed_scale_ready(self, job_id, local_rank):
+        self.manager.scale_ready(job_id, local_rank)
 
-    def exposed_update_log(self, size, rank, local_rank, epoch, num_samples,
-                           batch_size, lr, throughput, loss, acc):
-        return self.manager.update_log(size, rank, local_rank, epoch,
+    def exposed_sync_progress(self, job_id):
+        return self.manager.sync_progress(job_id)
+
+    def exposed_update_log(self, job_id, size, rank, local_rank, epoch,
+                           num_samples, batch_size, lr, throughput, loss, acc):
+        return self.manager.update_log(job_id, size, rank, local_rank, epoch,
                                        num_samples, batch_size, lr, throughput,
                                        loss, acc)
 
-    def exposed_broadcast_complete(self, local_rank):
-        self.manager.broadcast_complete(local_rank)
+    def exposed_broadcast_complete(self, job_id, local_rank):
+        self.manager.broadcast_complete(job_id, local_rank)
 
-    def exposed_worker_release(self, local_rank):
-        self.manager.worker_release(local_rank)
+    def exposed_worker_release(self, job_id, local_rank):
+        self.manager.worker_release(job_id, local_rank)
 
-    def exposed_worker_complete(self, local_rank, save_path):
-        self.manager.worker_complete(local_rank, save_path)
+    def exposed_worker_complete(self, job_id, local_rank, save_path):
+        self.manager.worker_complete(job_id, local_rank, save_path)
 
     def exposed_free_port(self):
         return free_port()
 
-    def exposed_get_id(self, local_rank):
-        return self.manager.get_id(local_rank)
+    def exposed_get_id(self):
+        return self.manager.get_id()
 
     def exposed_get_gpu_status(self, local_rank):
         return self.manager.get_gpu_status(local_rank)

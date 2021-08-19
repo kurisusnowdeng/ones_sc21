@@ -36,6 +36,7 @@ def get_args():
     parser.add_argument('--patience', type=int)
     parser.add_argument('--manager_addr', type=str, default='localhost')
     parser.add_argument('--manager_port', type=int, default=17834)
+    parser.add_argument('--job_id', type=int)
     parser.add_argument('--port', type=int)
     parser.add_argument('--local_rank', type=int, default=0)
     return parser.parse_args()
@@ -46,7 +47,7 @@ ARGS = get_args()
 device = 'cuda'
 torch.backends.cudnn.benchmark = True
 
-sa = scaling.ScalingAgent(ARGS.model, ARGS.local_rank, ARGS.port,
+sa = scaling.ScalingAgent(ARGS.job_id, ARGS.model, ARGS.local_rank, ARGS.port,
                           ARGS.manager_addr, ARGS.manager_port)
 
 # Data
