@@ -68,10 +68,10 @@ def _train_epoch(sa, epoch):
         batch_time = time.time() - now
         now = time.time()
 
-        # sa.logger.info(
-        #     '[%d/%d] LR: %g | Loss: %.3f | Throughput: %.3f (samples/sec)' %
-        #     (step + 1, len(sa.trainloader), cur_lr, train_loss /
-        #      (step + 1), global_batch_size / (batch_time + 1e-6)))
+        sa.logger.info(
+            '[%d/%d] LR: %g | Loss: %.3f | Throughput: %.3f (samples/sec)' %
+            (step + 1, len(sa.trainloader), cur_lr, train_loss /
+             (step + 1), global_batch_size / (batch_time + 1e-6)))
 
         if sa.check_pause():
             break

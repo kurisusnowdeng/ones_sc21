@@ -146,24 +146,12 @@ class AppManager:
             conn.root.broadcast_complete(job_id, self.id, local_rank)
 
     def worker_release(self, job_id, local_rank):
-        if self.worker_list[local_rank] is not None:
-            if self.worker_list[local_rank]['job_id'] == job_id:
-                self.worker_list[local_rank] = None
-        else:
-            logger.error(
-                'WorkerReleaseError: Job {} is not on node {} - GPU {}.'.
-                format(job_id, self.id, local_rank))
+        self.worker_list[local_rank] = None
 
     def worker_complete(self, job_id, local_rank, save_path):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             conn.root.worker_complete(job_id, self.id, local_rank, save_path)
-        if self.worker_list[local_rank] is not None and self.worker_list[
-                local_rank]['job_id'] == job_id:
-            self.worker_list[local_rank] = None
-        else:
-            logger.error(
-                'WorkerCompleteError: Job {} is not on node {} - GPU {}.'.
-                format(job_id, self.id, local_rank))
+        self.worker_list[local_rank] = None
 
     def get_id(self):
         return self.id

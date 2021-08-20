@@ -26,7 +26,7 @@ def get_args():
     parser.add_argument('--size', type=int)
     parser.add_argument('--scheduler',
                         type=str,
-                        default='FCFS',
+                        default='ONES',
                         help='FCFS/ONES')
     parser.add_argument('--cache_dir', type=str, default=log_path + 'cache')
     return parser.parse_args()
@@ -227,14 +227,15 @@ class Controller:
 
     def stop(self, job_id):
         self.jobs[job_id]['status'] = status_stopped
-        for (node_id, local_rank
-             ), worker in self.running_jobs[job_id]['workers'].items():
-            if worker['status'] == worker_running:
-                with rpyc.connect(self.cluster[node_id]['addr'],
-                                  self.cluster[node_id]['port']) as conn:
-                    logger.info('job %d: stopping node %d - GPU %d' %
-                                (job_id, node_id, local_rank))
-                    conn.root.set_stop(job_id, local_rank)
+        with self.running_jobs[job_id]['mutex']:
+            for (node_id, local_rank
+                ), worker in self.running_jobs[job_id]['workers'].items():
+                if worker['status'] == worker_running:
+                    with rpyc.connect(self.cluster[node_id]['addr'],
+                                    self.cluster[node_id]['port']) as conn:
+                        logger.info('job %d: stopping node %d - GPU %d' %
+                                    (job_id, node_id, local_rank))
+                        conn.root.set_stop(job_id, local_rank)
 
     def setup(self, job_id, node_id, local_rank):
         job = self.running_jobs[job_id]
@@ -260,16 +261,18 @@ class Controller:
         return size, rank, master_addr, master_port
 
     def _set_scale(self, job_id):
-        for (node_id, local_rank
-             ), worker in self.running_jobs[job_id]['workers'].items():
-            if worker['status'] == worker_running:
-                logger.info('job %d: pausing node %d - GPU %d' %
-                            (job_id, node_id, local_rank))
-                with rpyc.connect(self.cluster[node_id]['addr'],
-                                  self.cluster[node_id]['port']) as conn:
-                    conn.root.set_scale(
-                        job_id, local_rank, self.running_jobs[job_id]['batch_size'],
-                        self.running_jobs[job_id]['lr'])
+        with self.running_jobs[job_id]['mutex']:
+            for (node_id, local_rank
+                ), worker in self.running_jobs[job_id]['workers'].items():
+                if worker['status'] == worker_running:
+                    logger.info('job %d: pausing node %d - GPU %d' %
+                                (job_id, node_id, local_rank))
+                    with rpyc.connect(self.cluster[node_id]['addr'],
+                                    self.cluster[node_id]['port']) as conn:
+                        conn.root.set_scale(
+                            job_id, local_rank,
+                            self.running_jobs[job_id]['batch_size'],
+                            self.running_jobs[job_id]['lr'])
 
     def _check_worker_status(self, job_id, status_list):
         cnt = 0
@@ -356,10 +359,12 @@ class Controller:
                     waiting_job = self.waiting_jobs[job_id]
                     with waiting_job['mutex']:
                         waiting_job['status'] = wait_for_resuming
-                        waiting_job['size'] = self.running_jobs[job_id]['size']
                         if self.monitoring:
-                            self.monitor.monitored_jobs[job_id][
-                                'max_size'] = waiting_job['size']
+                            waiting_job['size'] = self.monitor.monitored_jobs[
+                                job_id]['max_size']
+                        else:
+                            waiting_job['size'] = self.running_jobs[job_id][
+                                'size']
                     logger.info('job %d stopped, %d samples completed' %
                                 (job_id, job['completed_samples']))
                 self.running_jobs[job_id]['workers'].clear()
@@ -436,9 +441,10 @@ class Controller:
 
     def get_new_jobs(self):
         return [
-            job['id'] for job in self.waiting_jobs
-            if (job['status'] == wait_for_start) or (
-                job['status'] == wait_for_resuming
+            job['id'] for job in self.jobs
+            if (job['status'] == status_submitted) or (
+                job['status'] == status_stopped
+                and self.waiting_jobs[job['id']]['status'] == wait_for_resuming
                 and job['completed_epochs'] < num_epochs_before_next_scaling)
         ]
 
@@ -450,6 +456,7 @@ class Controller:
     def get_waiting_jobs(self):
         return [
             job['id'] for job in self.waiting_jobs if job['status'] is not None
+            and self.jobs[job['id']] != status_complete
         ]
 
     def get_active_jobs(self):
@@ -474,9 +481,12 @@ class Controller:
         for node in self.cluster:
             with rpyc.connect(node['addr'], node['port']) as conn:
                 for local_rank in range(node['num_gpus']):
-                    logger.info('Node {} - GPU {} is running job {}'.format(
-                        node['id'], local_rank,
-                        conn.root.get_gpu_status(local_rank)))
+                    job_id = conn.root.get_gpu_status(local_rank)
+                    epoch = self.jobs[job_id][
+                        'completed_epochs'] if job_id is not None else 'na'
+                    logger.info(
+                        'Node {} - GPU {} is running job {} (epoch {})'.format(
+                            node['id'], local_rank, job_id, epoch))
 
     def num_free_gpus(self):
         num_free_gpus = 0
@@ -573,10 +583,12 @@ def main():
         os.makedirs(log_path)
     if not os.path.exists(ckpt_path):
         os.makedirs(ckpt_path)
+    if not os.path.exists(out_path):
+        os.makedirs(out_path)
 
     controller = Controller(get_local_ip(),
                             ARGS.port,
-                            monitoring=ARGS.scheduler in ['ONES', 'FCFS'])
+                            monitoring=ARGS.scheduler == 'ONES')
 
     t = ThreadedServer(ControllerService(controller), port=controller.port)
     server = Thread(target=t.start, args=())
@@ -595,9 +607,9 @@ def main():
     logger.info('All nodes joined (%d/%d)' %
                 (len(controller.cluster), ARGS.size))
 
-    # sched, t_sched = run_scheduler(controller)
-    # num_submitted_jobs = run_trace()
-    num_submitted_jobs = run_test(controller)
+    sched, t_sched = run_scheduler(controller, ARGS.scheduler)
+    num_submitted_jobs = run_trace(num_jobs)
+    # num_submitted_jobs = run_test(controller)
 
     try:
         while controller.completed_jobs < num_submitted_jobs:
@@ -607,7 +619,7 @@ def main():
         print(e)
 
     controller.terminate(ARGS.cache_dir)
-    # terminate_scheduler(sched, t_sched)
+    terminate_scheduler(sched, t_sched)
     logger.info('System shut down.')
     sys.exit()
 

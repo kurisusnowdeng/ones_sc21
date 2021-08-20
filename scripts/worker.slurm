@@ -3,7 +3,7 @@
 pwd
 date
 
-cd /path/to/project
+cd /home1/08115/zbian/scheduler
 
 source ~/python-env/ones/bin/activate
 

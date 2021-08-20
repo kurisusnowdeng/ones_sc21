@@ -1,4 +1,5 @@
 import csv
+import time
 from threading import Lock, Thread
 
 import numpy as np
@@ -171,10 +172,14 @@ class Monitor:
             'status': monitored_status_active,
             'train_log': list(),
             'initial_loss': None,
+            'loss': None,
+            'acc': None,
             'throughput': dict(),
             'completed_samples': 0,
             'predicted_progress': None,
-            'batch_size_limit': 1
+            'max_size': 1,
+            'last_epoch_scaled': 0,
+            'last_epoch_scheduled': 0
         }
         new_monitored_job['throughput'][0] = [0.]
         self.monitored_jobs.append(new_monitored_job)
@@ -202,29 +207,26 @@ class Monitor:
                     len(self.predictor_data)))
             self._update_predictor()
 
-    def _num_nodes(self, placement):
-        nodes = set()
-        for node, _ in placement:
-            if node not in nodes:
-                nodes.add(node)
-        return len(nodes)
-
     def _predict(self, inputs):
         with self.predictor_ready:
             return self.predictor.predict(inputs)
 
     def predict_remaining_workload(self, job_list):
-        inputs = list()
-        for job_id in job_list:
-            job = self.monitored_jobs[job_id]
-            inputs.append([
-                job['epoch_size'], job['initial_loss'],
-                job['completed_samples'] / job['epoch_size'],
-                1 - job['loss'] / job['initial_loss'], job['acc']
-            ])
-        predictions = self._predict(inputs)
-        for job_id, progress in zip(job_list, predictions):
-            self.monitored_jobs[job_id]['predictred_progress'] = progress
+        if len(job_list) > 0:
+            inputs = list()
+            for job_id in job_list:
+                job = self.monitored_jobs[job_id]
+                inputs.append([
+                    job['epoch_size'], job['initial_loss'],
+                    job['completed_samples'] / job['epoch_size'],
+                    1 - job['loss'] / job['initial_loss'], job['acc']
+                ])
+            predictions = self._predict(inputs)
+            for i, progress in enumerate(predictions):
+                self.monitored_jobs[
+                    job_list[i]]['predicted_progress'] = progress
+        else:
+            logger.info('No job to predict.')
 
     def get_throughput(self, job_id, size):
         job = self.monitored_jobs[job_id]
@@ -265,6 +267,8 @@ class Monitor:
                 'throughput': log['throughput']
             }
             job['train_log'].append(new_train_log)
+            job['loss'] = log['loss']
+            job['acc'] = log['acc']
         logger.info(
             'job %d - epoch %d (%d/%d samples (%d in total), batch size = %d, learning rate = %g): loss = %s, accuracy = %s, throughput = %s, best accuracy = %s'
             % (job_id, log['epoch'], log['num_samples'], job['epoch_size'],
@@ -277,8 +281,61 @@ class Monitor:
                 self.jobs[job_id]['convergence_counter'])))
         return
 
-    def scale_batch_size_limit(self, job_id):
-        pass
+    def scale_up(self, job_id):
+        if self.jobs[job_id]['status'] == status_running:
+            with self.waiting_jobs[job_id]['mutex']:
+                if self.running_jobs[job_id]['size'] == \
+                    self.monitored_jobs[job_id]['max_size']:
+                    self.monitored_jobs[job_id]['max_size'] *= 2
+                    logger.info('Job {} scaled up: {} --> {}.'.format(
+                        job_id, self.running_jobs[job_id]['size'],
+                        self.monitored_jobs[job_id]['max_size']))
+                self.waiting_jobs[job_id]['status'] = wait_for_scaling
+                self.waiting_jobs[job_id]['size'] = self.monitored_jobs[
+                    job_id]['max_size'] - self.running_jobs[job_id]['size']
+
+    def _get_median_run_time(self):
+        run_time = list()
+        cur_time = time.time()
+        for job in self.jobs:
+            if job['status'] == status_submitted:
+                continue
+            elif job['status'] == status_running:
+                run_time.append(job['run_time'] + cur_time -
+                                self.running_jobs[job['id']]['start_time'])
+            else:
+                run_time.append(job['run_time'])
+        return np.median(run_time)
+
+    def scale_down(self, job_id):
+        if self.jobs[job_id]['status'] == status_running \
+            and self.running_jobs[job_id]['size'] > 0:
+            run_time = self.jobs[job_id]['run_time'] + time.time(
+            ) - self.running_jobs[job_id]['start_time']
+            median_run_time = self._get_median_run_time()
+            max_size = np.maximum(
+                int(2 * self.running_jobs[job_id]['size'] /
+                    (scale_down_factor * run_time / median_run_time + 1)), 1)
+            max_size = (max_size // 2 + max_size % 2) * 2
+            # print('scaling down job {}: {} --> {}'.format(
+            #     job_id, self.running_jobs[job_id]['size'], max_size))
+            if run_time > median_run_time:
+                with self.waiting_jobs[job_id]['mutex']:
+                    self.waiting_jobs[job_id]['status'] = wait_for_scaling
+                    self.waiting_jobs[job_id][
+                        'size'] = max_size - self.running_jobs[job_id]['size']
+                    logger.info('Job {} scaled down: {} --> {}.'.format(
+                        job_id, self.running_jobs[job_id]['size'], max_size))
+
+    def scale_in(self, job_id):
+        job = self.waiting_jobs[job_id]
+        if job['status'] == wait_for_resuming and job['size'] > 1:
+            with job['mutex']:
+                prev_size = job['size']
+                job['size'] = job['size'] // 2
+                self.monitored_jobs[job_id]['max_size'] = job['size']
+                logger.info('Job {} scaled in: {} --> {}.'.format(
+                    job_id, prev_size, job['size']))
 
     def complete(self):
         with open(job_history_path, 'w') as f:
