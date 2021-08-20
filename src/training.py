@@ -129,6 +129,10 @@ def train(sa, num_epochs=None, patience=None):
         loss, acc = _eval(sa, epoch)
         epoch = sa.upload_log(epoch, 0, loss=loss, acc=acc)
     while True:
+        if num_epochs is not None and epoch > num_epochs:
+            break
+        if patience is not None and sa.convergence_counter >= patience:
+            break
         num_samples, loss, throughput = _train_epoch(sa, epoch)
         if num_samples * sa.size * 2 >= sa.epoch_size:
             loss, acc = _eval(sa, epoch)
@@ -143,10 +147,6 @@ def train(sa, num_epochs=None, patience=None):
             sa.scale()
         if sa.exit_status in [exit_released, exit_stopped]:
             return epoch
-        if num_epochs is not None and epoch > num_epochs:
-            break
-        if patience is not None and sa.convergence_counter >= patience:
-            break
     sa.exit_status = exit_complete
     return epoch
 
