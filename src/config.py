@@ -43,7 +43,7 @@ lr_scaling_factor = 1.0
 num_jobs = 50
 
 # parameters of evolutionary algorithm
-population_size = 8
+population_size = 64
 crossover_probability = 0.5
 mutate_rate = 0.3
 scale_down_factor = 1.0
