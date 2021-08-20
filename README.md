@@ -15,7 +15,7 @@ We present a prototype of ONES, which is implemented with [RPyC](https://rpyc.re
    cuDNN >= 7.6.3
    NCCL >= 2.4.8
    ```
-3. Download the repository.
+3. Download the v1.1 repository.
    ```
    $  git clone https://github.com/kurisusnowdeng/ones_sc21.git
    ```
