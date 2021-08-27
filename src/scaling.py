@@ -96,8 +96,9 @@ class ScalingAgent:
         self.num_labels = num_labels
         self.convergence_counter = 0
 
-        self.logger.info('Job {} - GPU {} initialization complete.'.format(
-            self.job_id, self.local_rank))
+        self.logger.info(
+            'Job {} (node {} - GPU {}): initialization complete.'.format(
+                self.job_id, self.node_id, self.local_rank))
 
         if scale:
             self._scale_sync()
@@ -109,8 +110,10 @@ class ScalingAgent:
             )
 
         while not self.train_ready():
-            self.logger.info('Job {}: GPU {} is not ready'.format(
-                self.job_id, self.local_rank))
+            self.logger.info(
+                'Job {} (rank {}/{}): node {} - GPU {} is not ready'.format(
+                    self.job_id, self.rank, self.size, self.node_id,
+                    self.local_rank))
             time.sleep(0.1)
 
         self.dist_net = torch.nn.parallel.DistributedDataParallel(self.net)
@@ -145,7 +148,10 @@ class ScalingAgent:
                                     ":" + str(self.master_port),
                                     world_size=self.size,
                                     rank=self.rank)
-            self.logger.info('GPU %d : NCCL setup complete' % self.local_rank)
+            self.logger.info(
+                'Job {} ({}/{}) on node {} - GPU {}: NCCL setup complete'.
+                format(self.job_id, self.rank, self.size, self.node_id,
+                       self.local_rank))
 
     def _sync_progress(self):
         with rpyc.connect(self.manager_addr, self.manager_port) as conn:
@@ -164,6 +170,10 @@ class ScalingAgent:
                                     rank=self.rank)
             for param in self.net.parameters():
                 dist.broadcast(param.data, src=0)
+            self.logger.info(
+                'Job {} ({}/{}) on node {} - GPU {}: parameters synchronized.'.
+                format(self.job_id, self.rank, self.size, self.node_id,
+                       self.local_rank))
             with rpyc.connect(self.manager_addr, self.manager_port) as conn:
                 conn.root.broadcast_complete(self.job_id, self.local_rank)
             dist.barrier()

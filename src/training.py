@@ -68,10 +68,10 @@ def _train_epoch(sa, epoch):
         batch_time = time.time() - now
         now = time.time()
 
-        sa.logger.info(
-            '[%d/%d] LR: %g | Loss: %.3f | Throughput: %.3f (samples/sec)' %
-            (step + 1, len(sa.trainloader), cur_lr, train_loss /
-             (step + 1), global_batch_size / (batch_time + 1e-6)))
+        # sa.logger.info(
+        #     '[%d/%d] LR: %g | Loss: %.3f | Throughput: %.3f (samples/sec)' %
+        #     (step + 1, len(sa.trainloader), cur_lr, train_loss /
+        #      (step + 1), global_batch_size / (batch_time + 1e-6)))
 
         if sa.check_pause():
             break
@@ -79,8 +79,8 @@ def _train_epoch(sa, epoch):
     epoch_end = time.time()
     epoch_loss = train_loss / batch_cnt
     epoch_throughput = num_samples / (epoch_end - epoch_start + 1e-6)
-    sa.logger.info('\n[Epoch %d] Loss: %.3f | Throughput: %.3f (samples/sec)' %
-                   (epoch, epoch_loss, epoch_throughput))
+    sa.logger.info('\n[Job %d - Epoch %d] Loss: %.3f | Throughput: %.3f (samples/sec)' %
+                   (sa.job_id, epoch, epoch_loss, epoch_throughput))
 
     return num_samples, epoch_loss, epoch_throughput
 
@@ -117,8 +117,9 @@ def _eval(sa, epoch):
 
         eval_loss = eval_loss / num_step
         acc = acc / total
-        sa.logger.info('[Epoch %d] Evaluation loss: %.3f | Acc: %.3f%%' %
-                       (epoch, eval_loss, acc * 100))
+        sa.logger.info(
+            '[Job %d - Epoch %d] Evaluation loss: %.3f | Acc: %.3f%%' %
+            (sa.job_id, epoch, eval_loss, acc * 100))
     return eval_loss, acc
 
 
@@ -152,7 +153,7 @@ def train(sa, num_epochs=None, patience=None):
 
 
 def save(sa, epoch, path):
-    if sa.rank == 0:
+    if sa.rank == 0 and sa.exit_status != exit_released:
         state = {
             'net': sa.net.state_dict(),
             'epoch': epoch,

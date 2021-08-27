@@ -1,10 +1,16 @@
 import csv
+import os
+import sys
 
 import matplotlib
 
 matplotlib.use('AGG')
 import matplotlib.pyplot as plt
 import numpy as np
+
+project_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.append(project_path)
+from src.utils import *
 
 out_path = './out/'
 
@@ -20,10 +26,12 @@ delay = [[] for _ in x]
 
 
 def read_results(i):
-    with open(out_path + name[i] + '_profile.csv', 'r') as f:
+    check_exists(name[i])
+    file = out_path + name[i] + '_profile.csv'
+    with open(file, 'r') as f:
         reader = csv.reader(f)
         next(reader, None)
-        for id, j, e, d in reader:
+        for _, j, e, d in reader:
             jct[i].append(int(j))
             exec[i].append(int(e))
             delay[i].append(int(d))
@@ -67,7 +75,8 @@ def plot_results(data, res_type):
         plt.plot(z, y, color=color[i], ls=line[i], linewidth=3, label=name[i])
     plt.ylim(0, 1)
     plt.yticks([0, 0.2, 0.4, 0.6, 0.8, 1])
-    plt.xscale('log')
+    if res_type != 'queuing_time':
+        plt.xscale('log')
     plt.xlabel(res_type + ' (s)')
     plt.ylabel('CF')
     plt.grid()

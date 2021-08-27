@@ -10,6 +10,12 @@ mkdir checkpoints
 
 mkdir checkpoints/test
 
+mkdir out
+
+rm log/test/*
+
+rm -rf checkpoints/test/*
+
 cd $SCRATCH
 
 wget --load-cookies /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id=1zLi5BKEH1TEbkPriLAJmW4seaq7Tx254' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1zLi5BKEH1TEbkPriLAJmW4seaq7Tx254" -O cifar-10.tar.gz && rm -rf /tmp/cookies.txt

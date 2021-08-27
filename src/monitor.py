@@ -276,23 +276,27 @@ class Monitor:
                "n/a" if log['loss'] is None else "%.3f" % log['loss'],
                "n/a" if log['acc'] is None else "%.3f%%" %
                (log['acc'] * 100), "n/a" if log['throughput'] is None else
-               "%.3f samples/sec" % log['throughput'], "%.3f%% (%d)" %
-               (self.jobs[job_id]['best_acc'] * 100,
-                self.jobs[job_id]['convergence_counter'])))
+               "%.3f samples/sec" % log['throughput'], "%.3f%% (%d/%d)" %
+               (self.jobs[job_id]['best_acc'] * 100, self.jobs[job_id]
+                ['convergence_counter'], self.jobs[job_id]['patience'])))
         return
 
-    def scale_up(self, job_id):
+    def scale_up(self, job_id, cluster_size):
         if self.jobs[job_id]['status'] == status_running:
             with self.waiting_jobs[job_id]['mutex']:
                 if self.running_jobs[job_id]['size'] == \
                     self.monitored_jobs[job_id]['max_size']:
-                    self.monitored_jobs[job_id]['max_size'] *= 2
+                    self.monitored_jobs[job_id]['max_size'] = np.minimum(
+                        cluster_size,
+                        self.monitored_jobs[job_id]['max_size'] * 2)
                     logger.info('Job {} scaled up: {} --> {}.'.format(
                         job_id, self.running_jobs[job_id]['size'],
                         self.monitored_jobs[job_id]['max_size']))
                 self.waiting_jobs[job_id]['status'] = wait_for_scaling
-                self.waiting_jobs[job_id]['size'] = self.monitored_jobs[
-                    job_id]['max_size'] - self.running_jobs[job_id]['size']
+                self.waiting_jobs[job_id]['size'] = np.minimum(
+                    self.monitored_jobs[job_id]['max_size'],
+                    self.jobs[job_id]['num_gpus'] *
+                    4) - self.running_jobs[job_id]['size']
 
     def _get_median_run_time(self):
         run_time = list()

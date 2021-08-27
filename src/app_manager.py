@@ -4,7 +4,7 @@ import random
 import subprocess
 import sys
 import time
-from threading import Thread
+from threading import Thread, Lock
 
 import numpy as np
 import rpyc
@@ -60,6 +60,7 @@ class AppManager:
         self.controller_port = ctrl_port
         self.exit = False
         self.worker_list = [None] * self.num_gpus
+        self.mutex = [Lock() for _ in range(self.num_gpus)]
         with rpyc.connect(ctrl_addr, ctrl_port) as conn:
             self.id = conn.root.join(addr, port, self.num_gpus)
 
@@ -81,14 +82,17 @@ class AppManager:
             self.id, job['id'], local_rank))
 
         while self.get_gpu_status(local_rank) is not None:
-            logger.info('Node {} - GPU {} is not ready for job {}, used by job {}'.
-                  format(self.id, local_rank, job['id'],
-                         self.get_gpu_status(local_rank)))
+            logger.info(
+                'Node {} - GPU {} is not ready for job {}, used by job {}'.
+                format(self.id, local_rank, job['id'],
+                       self.get_gpu_status(local_rank)))
             time.sleep(0.1)
-        self.worker_list[local_rank] = worker
-        self.worker_list[local_rank]['process'] = p
-        logger.info('Node {}: job {} start on GPU {}.'.format(
-            self.id, job['id'], local_rank))
+
+        with self.mutex[local_rank]:
+            self.worker_list[local_rank] = worker
+            self.worker_list[local_rank]['process'] = p
+            logger.info('Node {}: job {} start on GPU {}.'.format(
+                self.id, job['id'], local_rank))
 
     def setup(self, job_id, local_rank):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
@@ -103,28 +107,30 @@ class AppManager:
     def set_scale(self, job_id, local_rank, batch_size, lr):
         logger.info('job %d: pausing node %d - GPU %d' %
                     (job_id, self.id, local_rank))
-        if self.worker_list[local_rank] is not None:
+        if self.get_gpu_status(local_rank) == job_id:
             addr = 'localhost'
             port = self.worker_list[local_rank]['port']
             with rpyc.connect(addr, port) as conn:
                 conn.root.set_scale(batch_size, lr)
         else:
             logger.error(
-                'SetScaleError: Job {} is not on node {} - GPU {}.'.format(
-                    job_id, self.id, local_rank))
+                'SetScaleError: Job {} is not on node {} - GPU {}, used by {}.'
+                .format(job_id, self.id, local_rank,
+                        self.get_gpu_status(local_rank)))
 
     def set_stop(self, job_id, local_rank):
         logger.info('job %d: stopping node %d - GPU %d' %
                     (job_id, self.id, local_rank))
-        if self.worker_list[local_rank] is not None:
+        if self.get_gpu_status(local_rank) == job_id:
             addr = 'localhost'
             port = self.worker_list[local_rank]['port']
             with rpyc.connect(addr, port) as conn:
                 conn.root.set_stop()
         else:
             logger.error(
-                'SetStopError: Job {} is not on node {} - GPU {}.'.format(
-                    job_id, self.id, local_rank))
+                'SetStopError: Job {} is not on node {} - GPU {}, used by {}.'.
+                format(job_id, self.id, local_rank,
+                       self.get_gpu_status(local_rank)))
 
     def scale_ready(self, job_id, local_rank):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
@@ -146,21 +152,31 @@ class AppManager:
             conn.root.broadcast_complete(job_id, self.id, local_rank)
 
     def worker_release(self, job_id, local_rank):
-        self.worker_list[local_rank] = None
+        if self.get_gpu_status(local_rank) == job_id:
+            with self.mutex[local_rank]:
+                self.worker_list[local_rank] = None
+                logger.info('Node {} - GPU {}: job {} left.'.format(
+                    self.id, local_rank, job_id))
+        else:
+            logger.error(
+                'WorkerExitError: Job {} is not on node {} - GPU {}, used by {}.'
+                .format(job_id, self.id, local_rank,
+                        self.get_gpu_status(local_rank)))
 
     def worker_complete(self, job_id, local_rank, save_path):
         with rpyc.connect(self.controller_addr, self.controller_port) as conn:
             conn.root.worker_complete(job_id, self.id, local_rank, save_path)
-        self.worker_list[local_rank] = None
+        self.worker_release(job_id, local_rank)
 
     def get_id(self):
         return self.id
 
     def get_gpu_status(self, local_rank):
-        if self.worker_list[local_rank] is not None:
-            return self.worker_list[local_rank]['job_id']
-        else:
-            return None
+        with self.mutex[local_rank]:
+            if self.worker_list[local_rank] is not None:
+                return self.worker_list[local_rank]['job_id']
+            else:
+                return None
 
     def set_exit(self):
         self.exit = True

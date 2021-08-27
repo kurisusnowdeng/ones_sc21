@@ -87,7 +87,8 @@ class Controller:
             'model_path': ckpt_path + str(job_id) + '/',
             'target_acc': target_acc,
             'best_acc': None,
-            'convergence_counter': 0
+            'convergence_counter': 0,
+            'patience': int(script[-1].split('=')[-1])
         }
         new_running_job = {
             'id': job_id,
@@ -173,7 +174,7 @@ class Controller:
             waiting_job['status'] = None
             waiting_job['size'] = 0
         if scale is None:
-            running_job['placement'] = placement
+            running_job['placement'] = placement[:]
             running_job['size'] = len(placement)
             master_node, _ = placement[0]
             with rpyc.connect(self.cluster[master_node]['addr'],
@@ -195,7 +196,7 @@ class Controller:
                              False)).start()
             running_job['start_time'] = time.time()
         elif scale == 'out':
-            running_job['new_placement'] = placement
+            running_job['new_placement'] = placement[:]
             prev_size = running_job['size']
             cur_placement = running_job['placement']
             workers = running_job['workers']
@@ -229,10 +230,10 @@ class Controller:
         self.jobs[job_id]['status'] = status_stopped
         with self.running_jobs[job_id]['mutex']:
             for (node_id, local_rank
-                ), worker in self.running_jobs[job_id]['workers'].items():
+                 ), worker in self.running_jobs[job_id]['workers'].items():
                 if worker['status'] == worker_running:
                     with rpyc.connect(self.cluster[node_id]['addr'],
-                                    self.cluster[node_id]['port']) as conn:
+                                      self.cluster[node_id]['port']) as conn:
                         logger.info('job %d: stopping node %d - GPU %d' %
                                     (job_id, node_id, local_rank))
                         conn.root.set_stop(job_id, local_rank)
@@ -263,12 +264,12 @@ class Controller:
     def _set_scale(self, job_id):
         with self.running_jobs[job_id]['mutex']:
             for (node_id, local_rank
-                ), worker in self.running_jobs[job_id]['workers'].items():
+                 ), worker in self.running_jobs[job_id]['workers'].items():
                 if worker['status'] == worker_running:
                     logger.info('job %d: pausing node %d - GPU %d' %
                                 (job_id, node_id, local_rank))
                     with rpyc.connect(self.cluster[node_id]['addr'],
-                                    self.cluster[node_id]['port']) as conn:
+                                      self.cluster[node_id]['port']) as conn:
                         conn.root.set_scale(
                             job_id, local_rank,
                             self.running_jobs[job_id]['batch_size'],
@@ -309,7 +310,7 @@ class Controller:
                             local_rank)]['status'] = worker_scale_complete
             if self._check_worker_status(
                     job_id, [worker_scale_complete]) == job['size']:
-                job['placement'] = job['new_placement']
+                job['placement'] = job['new_placement'][:]
                 del job['new_placement']
                 job['size'] = len(job['placement'])
                 master_node, _ = job['placement'][0]
@@ -326,9 +327,10 @@ class Controller:
                                              j) in enumerate(job['placement'])}
                 logger.info('job %d: scaling complete --> ' % job_id +
                             str(job['placement']))
-        if self.monitoring:
-            self.monitor.monitored_jobs[job_id][
-                'last_scaled_epoch'] = self.jobs[job_id]['completed_epochs']
+                if self.monitoring:
+                    self.monitor.monitored_jobs[job_id][
+                        'last_scaled_epoch'] = self.jobs[job_id][
+                            'completed_epochs']
         return
 
     def worker_complete(self, job_id, node_id, local_rank, save_path):
@@ -478,15 +480,28 @@ class Controller:
             return conn.root.get_gpu_status(local_rank)
 
     def print_cluster(self):
+        logger.info('Checking cluster status ...')
         for node in self.cluster:
             with rpyc.connect(node['addr'], node['port']) as conn:
                 for local_rank in range(node['num_gpus']):
                     job_id = conn.root.get_gpu_status(local_rank)
-                    epoch = self.jobs[job_id][
-                        'completed_epochs'] if job_id is not None else 'na'
-                    logger.info(
-                        'Node {} - GPU {} is running job {} (epoch {})'.format(
-                            node['id'], local_rank, job_id, epoch))
+                    if job_id is None:
+                        logger.info(
+                            'Node {} - GPU {} is running job {}.'.format(
+                                node['id'], local_rank, job_id))
+                    else:
+                        epoch = self.jobs[job_id]['completed_epochs']
+                        if self.monitoring:
+                            last_scheduled_epoch = self.monitor.monitored_jobs[
+                                job_id]['last_epoch_scheduled']
+                            logger.info(
+                                'Node {} - GPU {} is running job {} @ epoch {} (+{}).'
+                                .format(node['id'], local_rank, job_id, epoch,
+                                        epoch - last_scheduled_epoch))
+                        else:
+                            logger.info(
+                                'Node {} - GPU {} is running job {} @ epoch {}.'
+                                .format(node['id'], local_rank, job_id, epoch))
 
     def num_free_gpus(self):
         num_free_gpus = 0

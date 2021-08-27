@@ -57,6 +57,8 @@ class BaseScheduler:
                 ['id', 'completion_time', 'execution_time', 'waiting_time'])
             for job in self.jobs:
                 job_id = job['id']
+                submission_time = job['start_time']
+                end_time = job['end_time']
                 completion_time = end_time - submission_time
                 execution_time = job['run_time']
                 waiting_time = completion_time - execution_time
@@ -170,21 +172,24 @@ class ONESScheduler(BaseScheduler):
         return population, schedule
 
     def _wait_for_execution(self, placement):
-        is_complete = False
-        while not is_complete:
+        all_jobs_running = False
+        while not all_jobs_running:
             time.sleep(0.1)
-            is_complete = True
+            all_jobs_running = True
             for j in placement:
-                if not is_complete or self.jobs[j]['status'] not in [
+                if not all_jobs_running or self.jobs[j]['status'] not in [
                         status_running, status_complete
                 ]:
-                    is_complete = False
+                    all_jobs_running = False
                     break
                 elif self.jobs[j]['status'] == status_running:
                     for (node_id, local_rank) in placement[j]:
                         if (node_id, local_rank) in self.running_jobs[j]['workers'] \
-                         and self.running_jobs[j]['workers'][(node_id, local_rank)]['status'] != worker_running:
-                            is_complete = False
+                         and self.running_jobs[j]['workers'][(node_id, local_rank)]['status'] == worker_running \
+                         and self.controller.get_gpu_status(node_id, local_rank) == j:
+                            continue
+                        else:
+                            all_jobs_running = False
                             break
         for j in placement:
             self.monitored_jobs[j]['last_epoch_scheduled'] = self.jobs[j][
@@ -201,18 +206,12 @@ class ONESScheduler(BaseScheduler):
         self.iteration += 1
         self.executed_jobs = self._scan_executed_jobs()
         self.monitor.predict_remaining_workload(self.executed_jobs)
-        # print(self.executed_jobs)
-        # print([
-        #  self.monitored_jobs[j]['predicted_progress']
-        #  for j in self.executed_jobs
-        # ])
         # scale up
         for j in self._scan_running_jobs():
             if self.jobs[j]['completed_epochs'] - self.monitored_jobs[j][
                     'last_epoch_scaled'] >= num_epochs_before_next_scaling:
-                self.monitor.scale_up(j)
-        # scale down
-        # find job with largest size
+                self.monitor.scale_up(j, self.cluster_size)
+        # scale down job with largest size
         largest_job = -1
         largest_job_size = 0
         for j in self._scan_running_jobs():
@@ -226,7 +225,6 @@ class ONESScheduler(BaseScheduler):
         if largest_job >= 0 and largest_job_size >= self.cluster_size // 2:
             self.monitor.scale_down(largest_job)
         # evolve
-        # self.schedule = self._refresh(self.schedule)
         for i in range(self.cluster_size):
             j = self.schedule[i]
             if j is not None and self.jobs[j]['status'] == status_complete:
@@ -409,25 +407,54 @@ class ONESScheduler(BaseScheduler):
             else:
                 allocation[j] += x
             k += x
+        for j in allocation:
+            allocation[j] = int(allocation[j])
         # print('Pad:', schedule, '=', before_pad, '-->', allocation)
         return allocation
 
     def _reorder(self, allocation):
-        s = self._empty_schedule()
+        # packed placement with an approximate levenshtein distance
+        src = self.schedule
+        n = self.cluster_size
+        m = len(allocation)
+        f = np.array([[np.inf] * (m + 1)] * (n + 1))
+        f[0][0] = 0
+        s = [[list() for _ in range(m + 1)] for _ in range(n + 1)]
+        max_k = 0
+        for i in range(1, n + 1):
+            mm = np.minimum(max_k + 2, m + 1)
+            for k in range(mm):
+                if f[i - 1][k] < f[i][k]:
+                    f[i][k] = f[i - 1][k]
+                    s[i][k] = s[i - 1][k][:]
+                    s[i][k].append(None)
+                if k > 0:
+                    for j in allocation:
+                        ii = i - allocation[j]
+                        if ii >= 0 and f[ii][k - 1] < np.inf and \
+                      j not in s[ii][k - 1]:
+                            y = f[ii][k - 1]
+                            for x in range(ii, i):
+                                if src[x] is not None and src[x] != j:
+                                    y += 1
+                            if y < f[i][k]:
+                                f[i][k] = y
+                                s[i][k] = s[ii][k - 1][:]
+                                s[i][k].append(j)
+                if k > max_k and f[i][k] < np.inf:
+                    max_k = k
+
+        out = self._empty_schedule()
         k = 0
-        for j in self.schedule:
-            if j is not None and j in allocation:
-                for _ in range(int(allocation[j])):
-                    s[k] = j
-                    k += 1
-                del allocation[j]
-        for j in allocation:
+        for j in s[n][m]:
             if j is not None:
-                for _ in range(int(allocation[j])):
-                    s[k] = j
+                for _ in range(allocation[j]):
+                    out[k] = j
                     k += 1
-        # print('Reorder:', allocation, '-->', s)
-        return s
+            else:
+                k += 1
+        # print('Reorder:', allocation, '-->', out)
+        return out
 
     def _select(self, population):
         scores = list()
@@ -443,7 +470,9 @@ class ONESScheduler(BaseScheduler):
                     score += y * n * (1 / (rho + 1e-12) - 1) / x
             scores.append(score)
         # print('Scores:', scores)
-        # print('Top scores:', np.sort(scores)[:self.size])
+        logger.info('Iteration {0} - top scores: {1}'.format(
+            self.iteration,
+            np.sort(scores)[:self.size]))
         selected_population = list(
             map(lambda i: population[i],
                 np.argsort(scores)[:self.size]))
@@ -461,7 +490,8 @@ class ONESScheduler(BaseScheduler):
         return placement
 
     def _update(self, src, dst):
-        logger.info('Iteration {0}: current {1} | best {2}.'.format(self.iteration, src, dst))
+        logger.info('Iteration {0}: current {1} | best {2}.'.format(
+            self.iteration, src, dst))
         cur_placement = self._get_placement(src)
         placement = self._get_placement(dst)
 
@@ -496,12 +526,14 @@ class ONESScheduler(BaseScheduler):
         for j in cur_placement:
             if self.monitored_jobs[j][
                     'last_epoch_scheduled'] + update_interval > self.jobs[j][
-                        'completed_epochs']:
+                        'completed_epochs'] or self.jobs[j][
+                            'patience'] - self.jobs[j][
+                                'convergence_counter'] < 3:
                 can_update = False
                 break
 
         if not can_update:
-            new_schedule = [j for j in src]
+            new_schedule = src[:]
             for i, j in enumerate(dst):
                 if src[i] is not None and src[i] in all_available \
                   and all_available[src[i]] and src[i] != j:

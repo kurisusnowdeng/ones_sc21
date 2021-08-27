@@ -1,7 +1,10 @@
-import time
 import logging
+import os
 import random
 import socket
+import time
+
+import requests
 
 from . import config
 
@@ -50,6 +53,16 @@ def free_port():
             return port
         except Exception:
             continue
+
+
+def check_exists(name):
+    file = './out/' + name + '_profile.csv'
+    url = 'https://raw.githubusercontent.com/kurisusnowdeng/ones_sc21/master/'
+
+    if not os.path.exists(file):
+        r = requests.get(url + 'out/' + name + '_profile.csv')
+        with open(file, 'wb') as f:
+            f.write(r.content)
 
 
 def time_to_str(t):

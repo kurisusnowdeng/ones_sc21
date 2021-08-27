@@ -36,7 +36,7 @@ task_scripts = {
 logger = get_logger('Workload')
 ctrl_addr = 'localHost'
 ctrl_port = 34625
-trace_file = 'trace_1.csv'
+trace_file = 'trace_dev.csv'
 
 def submit(model,
            task,

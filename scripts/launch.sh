@@ -16,7 +16,7 @@ do
 	esac
 done
 
-ROOT_PATH=/path/to/project
+ROOT_PATH=$HOME/scheduler
 LOG_PATH=log/test
 
 sbatch -J "${JOBNAME}_0" \
