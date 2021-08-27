@@ -1,4 +1,3 @@
-import copy
 import csv
 import random
 import time
@@ -42,7 +41,6 @@ class BaseScheduler:
         self.exit.clear()
         self.run()
         self.exit.clear()
-        self.profile()
         logger.info('Scheduler terminated.')
 
     @abstractmethod
@@ -526,9 +524,7 @@ class ONESScheduler(BaseScheduler):
         for j in cur_placement:
             if self.monitored_jobs[j][
                     'last_epoch_scheduled'] + update_interval > self.jobs[j][
-                        'completed_epochs'] or self.jobs[j][
-                            'patience'] - self.jobs[j][
-                                'convergence_counter'] < 3:
+                        'completed_epochs']:
                 can_update = False
                 break
 

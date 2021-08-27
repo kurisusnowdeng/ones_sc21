@@ -276,9 +276,9 @@ class Monitor:
                "n/a" if log['loss'] is None else "%.3f" % log['loss'],
                "n/a" if log['acc'] is None else "%.3f%%" %
                (log['acc'] * 100), "n/a" if log['throughput'] is None else
-               "%.3f samples/sec" % log['throughput'], "%.3f%% (%d/%d)" %
+               "%.3f samples/sec" % log['throughput'], "%.3f%% (%d)" %
                (self.jobs[job_id]['best_acc'] * 100, self.jobs[job_id]
-                ['convergence_counter'], self.jobs[job_id]['patience'])))
+                ['convergence_counter'])))
         return
 
     def scale_up(self, job_id, cluster_size):

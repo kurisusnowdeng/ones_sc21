@@ -87,8 +87,8 @@ class Controller:
             'model_path': ckpt_path + str(job_id) + '/',
             'target_acc': target_acc,
             'best_acc': None,
-            'convergence_counter': 0,
-            'patience': int(script[-1].split('=')[-1])
+            'convergence_counter': 0
+            # 'patience': int(script[-1].split('=')[-1])
         }
         new_running_job = {
             'id': job_id,
