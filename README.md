@@ -64,7 +64,7 @@ We present a prototype of ONES, which is implemented with [RPyC](https://rpyc.re
    ```
    $  ./scripts/launch.sh -j JOB_NAME -n 16 -t 06:00:00
    ```
-4. After the job is completed, extract and analyze results from logs (defaultly located in the folder `out/`, which can be modified in `src/config.py`).
+4. After the job is completed, extract and analyze results from logs (defaultly located in the folder `out/`, which can be changed in `src/config.py`).
    ```
    $  python ./scripts/measurement.py
    ```
