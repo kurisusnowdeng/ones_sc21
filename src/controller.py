@@ -13,7 +13,6 @@ from rpyc.utils.server import ThreadedServer
 from .config import *
 from .monitor import Monitor
 from .scheduler import *
-from .tests.tests import run_test
 from .utils import get_local_ip, get_logger
 from .workload import run_trace
 
@@ -624,7 +623,6 @@ def main():
 
     sched, t_sched = run_scheduler(controller, ARGS.scheduler)
     num_submitted_jobs = run_trace(num_jobs)
-    # num_submitted_jobs = run_test(controller)
 
     try:
         while controller.completed_jobs < num_submitted_jobs:
